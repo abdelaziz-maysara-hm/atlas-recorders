@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas Screen Recorder</title>
+  <style>
+    :root {
+      --bg: #0a0a0b; --surface: #121214; --elevated: #1a1a1e; --fg: #f4f4f5;
+      --muted: #a1a1aa; --subtle: #71717a; --border: rgba(244,244,245,.12);
+      --accent: #c8ccd4; --accent-fg: #0a0a0b; --rec: #c45c5c;
+      --font: "Segoe UI", "IBM Plex Sans Arabic", Tahoma, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg); font-family: var(--font); }
+    body { max-width: 880px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.03em; }
+    .sub { color: var(--muted); margin: 6px 0 22px; font-size: 0.95rem; }
+    .brand { font-size: 0.8rem; color: var(--muted); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px; }
+    .stage { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+    video { width: 100%; aspect-ratio: 16/9; background: #000; display: block; object-fit: contain; }
+    .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); pointer-events: none; }
+    .count { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 4rem; font-weight: 600; background: rgba(10,10,11,.7); }
+    .time { font-size: 2.4rem; font-weight: 600; text-align: center; margin: 18px 0 4px; font-variant-numeric: tabular-nums; }
+    .status { text-align: center; color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; }
+    button, select {
+      min-height: 44px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--elevated); color: var(--fg); font: inherit; padding: 0 16px; cursor: pointer;
+    }
+    button.primary { background: var(--rec); border: 0; font-weight: 600; min-width: 160px; }
+    button.save { background: var(--accent); color: var(--accent-fg); border: 0; font-weight: 600; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin: 14px 0 6px; }
+    select { width: 100%; }
+    .grid { display: grid; gap: 16px; }
+    @media (min-width: 800px) { .grid { grid-template-columns: 1fr 240px; } }
+    .item { display: flex; gap: 8px; align-items: center; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 10px 12px; margin-top: 8px; }
+    .item p { margin: 0; flex: 1; min-width: 0; }
+    .item small { display: block; color: var(--subtle); }
+    .err { color: var(--rec); font-size: 0.9rem; text-align: center; min-height: 1.2em; }
+    .note { color: var(--subtle); font-size: 0.8rem; margin-top: 16px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="brand">Atlas Recorders</div>
+  <h1>Atlas Screen Recorder</h1>
+  <p class="sub">سجّل الشاشة مع الصوت، وبعدين نزّل فيديو WebM على جهازك.</p>
+  <div class="grid">
+    <div>
+      <div class="stage">
+        <video id="preview" muted playsinline></video>
+        <div class="overlay" id="hint">المعاينة هتظهر بعد ما تبدأ</div>
+        <div class="count" id="count"></div>
+      </div>
+      <div class="time" id="time">00:00</div>
+      <div class="status" id="status">جاهز</div>
+      <p class="err" id="err"></p>
+      <div class="row" id="controls"></div>
+    </div>
+    <aside>
+      <label>الجودة</label>
+      <select id="quality">
+        <option value="720">720p · 30fps</option>
+        <option value="1080" selected>1080p · 30fps</option>
+        <option value="1080-60">1080p · 60fps</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:8px;min-height:44px;font-size:0.9rem;color:var(--fg)">
+        <input type="checkbox" id="mic" checked /> إضافة المايك
+      </label>
+      <p class="note">اختَر الشاشة أو النافذة، وفعّل مشاركة الصوت لو عايز صوت التبويب.</p>
+      <div id="list"></div>
+    </aside>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let rec, display, micStream, audioCtx, dest, timer;
+    let chunks = [], status = "idle", elapsed = 0, started = 0;
+    const takes = [];
+
+    function fmt(s) {
+      s = Math.max(0, Math.floor(s));
+      const m = String(Math.floor(s / 60)).padStart(2, "0");
+      const r = String(s % 60).padStart(2, "0");
+      return m + ":" + r;
+    }
+    function stamp() {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      return `Atlas_Screen_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.webm`;
+    }
+    function setStatus(s) {
+      status = s;
+      $("status").textContent = s === "live" ? "جاري التسجيل" : s === "paused" ? "متوقف مؤقتًا" : "جاهز";
+      $("hint").style.display = s === "idle" ? "flex" : "none";
+      $("quality").disabled = $("mic").disabled = s !== "idle";
+      renderBtns();
+    }
+    function renderBtns() {
+      const el = $("controls");
+      if (status === "idle") {
+        el.innerHTML = `<button class="primary" id="start">ابدأ التسجيل</button>`;
+        $("start").onclick = countdown;
+      } else {
+        el.innerHTML = `<button id="pause">${status === "paused" ? "استئناف" : "إيقاف مؤقت"}</button>
+          <button class="save" id="stop">إيقاف وحفظ</button>`;
+        $("pause").onclick = togglePause;
+        $("stop").onclick = stop;
+      }
+    }
+    function startClock() {
+      started = performance.now() - elapsed * 1000;
+      timer = setInterval(() => { elapsed = (performance.now() - started) / 1000; $("time").textContent = fmt(elapsed); }, 200);
+    }
+    function stopClock() { clearInterval(timer); }
+
+    async function countdown() {
+      const box = $("count");
+      box.style.display = "flex";
+      for (const n of [3, 2, 1]) { box.textContent = n; await new Promise(r => setTimeout(r, 700)); }
+      box.style.display = "none";
+      await begin();
+    }
+
+    async function begin() {
+      $("err").textContent = "";
+      const q = $("quality").value;
+      const height = q.startsWith("1080") ? 1080 : 720;
+      const fps = q === "1080-60" ? 60 : 30;
+      try {
+        display = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: fps, height: { ideal: height }, width: { ideal: height === 1080 ? 1920 : 1280 } },
+          audio: true
+        });
+      } catch {
+        $("err").textContent = "لازم توافق على مشاركة الشاشة.";
+        return;
+      }
+      display.getVideoTracks()[0].addEventListener("ended", () => stop());
+      if ($("mic").checked) {
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch {
+          $("err").textContent = "الشاشة اتفحت، لكن المايك اترفض.";
+        }
+      }
+      audioCtx = new AudioContext();
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      dest = audioCtx.createMediaStreamDestination();
+      [display, micStream].forEach(s => {
+        if (s && s.getAudioTracks().length) audioCtx.createMediaStreamSource(s).connect(dest);
+      });
+      const out = new MediaStream([...display.getVideoTracks(), ...dest.stream.getAudioTracks()]);
+      const v = $("preview"); v.srcObject = display; v.play().catch(() => {});
+      const types = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+      const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+      chunks = [];
+      rec = new MediaRecorder(out, mime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : undefined);
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => {
+        const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
+        takes.unshift({ name: stamp(), blob, duration: elapsed, size: blob.size });
+        renderList();
+        cleanup();
+        elapsed = 0; $("time").textContent = "00:00";
+        setStatus("idle");
+      };
+      rec.start(1000);
+      elapsed = 0; startClock(); setStatus("live");
+    }
+    function togglePause() {
+      if (!rec) return;
+      if (status === "live") { rec.pause(); stopClock(); setStatus("paused"); }
+      else { rec.resume(); startClock(); setStatus("live"); }
+    }
+    function stop() {
+      stopClock();
+      if (rec && rec.state !== "inactive") rec.stop();
+      rec = null;
+    }
+    function cleanup() {
+      [display, micStream].forEach(s => s && s.getTracks().forEach(t => t.stop()));
+      audioCtx && audioCtx.close();
+      $("preview").srcObject = null;
+      display = micStream = audioCtx = dest = null;
+    }
+    function renderList() {
+      $("list").innerHTML = takes.length ? takes.map((t, i) => `
+        <div class="item"><p>${t.name}<small>${fmt(t.duration)} · ${(t.size/1024/1024).toFixed(1)} MB</small></p>
+        <button data-i="${i}">تنزيل</button></div>`).join("") : "";
+      $("list").querySelectorAll("button").forEach(b => {
+        b.onclick = () => {
+          const t = takes[+b.dataset.i];
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(t.blob); a.download = t.name; a.click();
+        };
+      });
+    }
+    renderBtns();
+  </script>
+</body>
+</html>

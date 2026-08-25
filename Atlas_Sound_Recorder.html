@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas Sound Recorder</title>
+  <style>
+    :root {
+      --bg: #0a0a0b;
+      --surface: #121214;
+      --elevated: #1a1a1e;
+      --fg: #f4f4f5;
+      --muted: #a1a1aa;
+      --subtle: #71717a;
+      --border: rgba(244, 244, 245, 0.12);
+      --accent: #c8ccd4;
+      --accent-fg: #0a0a0b;
+      --rec: #c45c5c;
+      --font: "Segoe UI", "IBM Plex Sans Arabic", Tahoma, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg); font-family: var(--font); }
+    body { max-width: 720px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.03em; }
+    .sub { color: var(--muted); margin: 6px 0 22px; font-size: 0.95rem; }
+    .brand { font-size: 0.8rem; color: var(--muted); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px; }
+    canvas { width: 100%; height: 160px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; display: block; }
+    .time { font-size: 2.4rem; font-weight: 600; text-align: center; margin: 18px 0 4px; font-variant-numeric: tabular-nums; }
+    .status { text-align: center; color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; }
+    button, select {
+      min-height: 44px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--elevated); color: var(--fg); font: inherit; padding: 0 16px; cursor: pointer;
+    }
+    button.primary { background: var(--rec); border-color: transparent; font-weight: 600; min-width: 160px; }
+    button.save { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 600; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin: 14px 0 6px; }
+    select { width: 100%; }
+    .list { margin-top: 22px; }
+    .item { display: flex; gap: 8px; align-items: center; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 10px 12px; margin-top: 8px; }
+    .item p { margin: 0; flex: 1; min-width: 0; }
+    .item small { display: block; color: var(--subtle); }
+    .err { color: var(--rec); font-size: 0.9rem; text-align: center; min-height: 1.2em; }
+    .note { color: var(--subtle); font-size: 0.8rem; margin-top: 18px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="brand">Atlas Recorders</div>
+  <h1>Atlas Sound Recorder</h1>
+  <p class="sub">سجّل الصوت من المايك، وشوف المستوى، ونزّل الملف على جهازك.</p>
+  <canvas id="wave" width="960" height="220"></canvas>
+  <div class="time" id="time">00:00</div>
+  <div class="status" id="status">جاهز</div>
+  <p class="err" id="err"></p>
+  <div class="row" id="controls"></div>
+  <label>جهاز الإدخال</label>
+  <select id="device"><option value="">الافتراضي</option></select>
+  <label>صيغة الحفظ</label>
+  <select id="format">
+    <option value="wav">WAV بدون فقد</option>
+    <option value="webm">WebM مضغوط</option>
+  </select>
+  <div class="list" id="list"></div>
+  <p class="note">الملف بيتنزل على جهازك فقط. مفيش رفع على الإنترنت.</p>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const canvas = $("wave");
+    const ctx2d = canvas.getContext("2d");
+    let rec, stream, audioCtx, analyser, processor, raf, timer;
+    let chunks = [], pcm = [];
+    let status = "idle", elapsed = 0, started = 0, paused = false;
+    const takes = [];
+
+    function fmt(s) {
+      s = Math.max(0, Math.floor(s));
+      const m = String(Math.floor(s / 60)).padStart(2, "0");
+      const r = String(s % 60).padStart(2, "0");
+      return m + ":" + r;
+    }
+    function stamp(ext) {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      return `Atlas_Sound_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+    }
+    function setStatus(s) { status = s; $("status").textContent = s === "live" ? "جاري التسجيل" : s === "paused" ? "متوقف مؤقتًا" : "جاهز"; renderBtns(); }
+    function renderBtns() {
+      const el = $("controls");
+      if (status === "idle") {
+        el.innerHTML = `<button class="primary" id="start">ابدأ التسجيل</button>`;
+        $("start").onclick = start;
+      } else {
+        el.innerHTML = `<button id="pause">${status === "paused" ? "استئناف" : "إيقاف مؤقت"}</button>
+          <button class="save" id="stop">إيقاف وحفظ</button>`;
+        $("pause").onclick = togglePause;
+        $("stop").onclick = stop;
+      }
+    }
+    function draw() {
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(data);
+      ctx2d.fillStyle = "#121214";
+      ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+      ctx2d.strokeStyle = "#c8ccd4";
+      ctx2d.lineWidth = 1.5;
+      ctx2d.beginPath();
+      const slice = canvas.width / data.length;
+      for (let i = 0; i < data.length; i++) {
+        const y = (data[i] / 255) * canvas.height;
+        i === 0 ? ctx2d.moveTo(0, y) : ctx2d.lineTo(i * slice, y);
+      }
+      ctx2d.stroke();
+      raf = requestAnimationFrame(draw);
+    }
+    function startClock() {
+      started = performance.now() - elapsed * 1000;
+      timer = setInterval(() => {
+        elapsed = (performance.now() - started) / 1000;
+        $("time").textContent = fmt(elapsed);
+      }, 200);
+    }
+    function stopClock() { clearInterval(timer); }
+
+    function floatToWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const w = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+      w(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true);
+      w(8, "WAVE"); w(12, "fmt "); view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+      w(36, "data"); view.setUint32(40, samples.length * 2, true);
+      let o = 44;
+      for (let i = 0; i < samples.length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2;
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    async function loadDevices() {
+      try {
+        const list = await navigator.mediaDevices.enumerateDevices();
+        const ins = list.filter(d => d.kind === "audioinput");
+        const sel = $("device");
+        const cur = sel.value;
+        sel.innerHTML = `<option value="">الافتراضي</option>` + ins.map((d, i) =>
+          `<option value="${d.deviceId}">${d.label || ("مايك " + (i + 1))}</option>`).join("");
+        sel.value = cur;
+      } catch {}
+    }
+
+    async function start() {
+      $("err").textContent = "";
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: $("device").value ? { exact: $("device").value } : undefined }
+        });
+        await loadDevices();
+        audioCtx = new AudioContext();
+        if (audioCtx.state === "suspended") await audioCtx.resume();
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+        pcm = [];
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (ev) => {
+          if (paused) return;
+          pcm.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+        };
+        const mute = audioCtx.createGain(); mute.gain.value = 0;
+        source.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+        const types = ["audio/webm;codecs=opus", "audio/webm"];
+        const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+        chunks = [];
+        rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        rec.onstop = () => {
+          let blob, name;
+          if ($("format").value === "wav") {
+            const n = pcm.reduce((a, b) => a + b.length, 0);
+            const merged = new Float32Array(n); let o = 0;
+            pcm.forEach(p => { merged.set(p, o); o += p.length; });
+            blob = floatToWav(merged, audioCtx.sampleRate);
+            name = stamp("wav");
+          } else {
+            blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+            name = stamp("webm");
+          }
+          takes.unshift({ name, blob, duration: elapsed, size: blob.size });
+          renderList();
+          cleanup();
+          elapsed = 0; $("time").textContent = "00:00";
+          setStatus("idle");
+        };
+        rec.start(400);
+        paused = false; elapsed = 0;
+        startClock(); draw(); setStatus("live");
+      } catch {
+        $("err").textContent = "لازم توافق على إذن المايك من المتصفح.";
+      }
+    }
+    function togglePause() {
+      if (!rec) return;
+      if (status === "live") { rec.pause(); paused = true; stopClock(); setStatus("paused"); }
+      else { rec.resume(); paused = false; startClock(); setStatus("live"); }
+    }
+    function stop() {
+      stopClock();
+      if (rec && rec.state !== "inactive") rec.stop();
+      rec = null;
+    }
+    function cleanup() {
+      if (raf) cancelAnimationFrame(raf);
+      try { processor && processor.disconnect(); } catch {}
+      stream && stream.getTracks().forEach(t => t.stop());
+      audioCtx && audioCtx.close();
+      stream = analyser = processor = audioCtx = null;
+    }
+    function renderList() {
+      $("list").innerHTML = takes.length ? takes.map((t, i) => `
+        <div class="item">
+          <p>${t.name}<small>${fmt(t.duration)} · ${(t.size/1024).toFixed(0)} KB</small></p>
+          <button data-i="${i}">تنزيل</button>
+        </div>`).join("") : `<p class="status">لا توجد تسجيلات بعد.</p>`;
+      $("list").querySelectorAll("button").forEach(b => {
+        b.onclick = () => {
+          const t = takes[+b.dataset.i];
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(t.blob);
+          a.download = t.name; a.click();
+        };
+      });
+    }
+    loadDevices();
+    renderBtns();
+    renderList();
+  </script>
+</body>
+</html>
