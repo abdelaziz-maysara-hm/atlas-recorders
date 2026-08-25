@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import customtkinter as ctk
-import subprocess, shutil, time, os, sys, threading, json
+import subprocess, shutil, time, os, sys, threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, filedialog
+from tkinter import messagebox
 
 APP = "Atlas Screen Recorder"
 OUT = Path.home() / "AtlasRecordings" / "Screen"
@@ -28,7 +28,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(APP)
-        self.geometry("700x560")
+        self.geometry("720x620")
         self.ff = find_ffmpeg()
         self.proc = None
         self.recording = False
@@ -36,6 +36,7 @@ class App(ctk.CTk):
         self.out = None
         self.build()
         self.after(250, self.tick)
+        threading.Thread(target=self.hotkey_loop, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def build(self):
@@ -52,12 +53,12 @@ class App(ctk.CTk):
         self.fps.set("30")
         self.fps.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(box, text="Audio").pack(anchor="w", padx=12)
-        self.audio = ctk.CTkOptionMenu(box, values=["Microphone", "No Audio"])
-        self.audio.set("Microphone")
+        self.audio = ctk.CTkOptionMenu(box, values=["Microphone", "System", "Both", "No Audio"])
+        self.audio.set("Both")
         self.audio.pack(fill="x", padx=12, pady=(6, 14))
         self.timer = ctk.CTkLabel(self, text="00:00:00", font=ctk.CTkFont(size=40, weight="bold"))
         self.timer.pack(pady=8)
-        self.status = ctk.CTkLabel(self, text="Ready", text_color="gray")
+        self.status = ctk.CTkLabel(self, text="Ready  ·  Ctrl+Shift+R", text_color="gray")
         self.status.pack()
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(pady=16)
@@ -66,7 +67,26 @@ class App(ctk.CTk):
         self.b_stop = ctk.CTkButton(btns, text="Stop", width=120, height=48, state="disabled", command=self.stop)
         self.b_stop.pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Open Folder", width=120, height=48, fg_color="#1e293b", command=self.open_dir).pack(side="left", padx=6)
-        ctk.CTkLabel(self, text="Windows: full screen via FFmpeg. Enable Stereo Mix for system sound.\nSaves to Documents/AtlasRecordings/Screen", text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=8)
+        ctk.CTkLabel(
+            self,
+            text="Hotkey Ctrl+Shift+R  ·  System audio uses WASAPI loopback\nSaves to Documents/AtlasRecordings/Screen",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+        ).pack(pady=8)
+
+    def audio_args(self):
+        mode = self.audio.get()
+        if mode == "No Audio":
+            return []
+        if mode == "Microphone":
+            return ["-f", "dshow", "-i", "audio=default"]
+        if mode == "System":
+            return ["-f", "wasapi", "-loopback", "1", "-i", "default"]
+        return [
+            "-f", "wasapi", "-loopback", "1", "-i", "default",
+            "-f", "dshow", "-i", "audio=default",
+            "-filter_complex", "amix=inputs=2:duration=longest",
+        ]
 
     def start(self):
         if not self.ff:
@@ -81,11 +101,13 @@ class App(ctk.CTk):
         cmd = [self.ff, "-y"]
         if sys.platform == "win32":
             cmd += ["-f", "gdigrab", "-framerate", self.fps.get(), "-i", "desktop"]
-            if self.audio.get() != "No Audio":
-                cmd += ["-f", "dshow", "-i", "audio=default"]
+            cmd += self.audio_args()
         else:
             cmd += ["-f", "x11grab", "-framerate", self.fps.get(), "-i", ":0.0"]
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(self.out)]
+        if self.audio.get() == "No Audio":
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-an", str(self.out)]
+        else:
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(self.out)]
         si = None
         if sys.platform == "win32":
             si = subprocess.STARTUPINFO()
@@ -99,7 +121,7 @@ class App(ctk.CTk):
         self.t0 = time.time()
         self.b_rec.configure(state="disabled")
         self.b_stop.configure(state="normal")
-        self.status.configure(text="Recording", text_color="#ef4444")
+        self.status.configure(text="Recording  ·  Ctrl+Shift+R to stop", text_color="#ef4444")
 
     def stop(self):
         if not self.recording:
@@ -119,8 +141,30 @@ class App(ctk.CTk):
             mb = self.out.stat().st_size / 1024 / 1024
             self.status.configure(text=f"Saved {self.out.name} ({mb:.1f} MB)", text_color="#22c55e")
         else:
-            self.status.configure(text="Stopped")
+            self.status.configure(text="Stopped  ·  Ctrl+Shift+R")
         self.timer.configure(text="00:00:00")
+
+    def toggle_hotkey(self):
+        if self.recording:
+            self.stop()
+        else:
+            self.start()
+
+    def hotkey_loop(self):
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            if not user32.RegisterHotKey(None, 1, 0x0002 | 0x0004, 0x52):
+                return
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                if msg.message == 0x0312:
+                    self.after(0, self.toggle_hotkey)
+        except Exception:
+            return
 
     def open_dir(self):
         OUT.mkdir(parents=True, exist_ok=True)
