@@ -1,15 +1,14 @@
-# Atlas Apps — setup and usage
+# Atlas Apps — Windows EXE
 
-Portable Windows apps. No installer, no account, files stay on your PC.
+No Python install. No Setup.bat.
 
-## Setup (once per app)
+## Install
 
-1. Download the ZIP from [NetSec Atlas / Apps](https://netsecatlas.com/tools).
-2. Extract the folder anywhere (Desktop is fine).
-3. Run `Setup.bat` once. Internet is needed for this step only (Python packages).
-4. After that, start the app with `Run_Atlas_….bat`.
+1. Download the `*_Win.zip` for the app from [Releases](https://github.com/abdelaziz-maysara-hm/atlas-recorders/releases).
+2. Extract the folder.
+3. Double-click `Atlas_….exe`.
 
-If Windows SmartScreen says **Windows protected your PC**: **More info** → **Run anyway**.
+If SmartScreen says **Windows protected your PC**: **More info** → **Run anyway**.
 
 ## Apps
 
@@ -21,25 +20,12 @@ If Windows SmartScreen says **Windows protected your PC**: **More info** → **R
 | Atlas Screen Recorder | Ctrl+Shift+R | Documents\AtlasRecordings\Screen |
 | Atlas Sound Recorder | Ctrl+Shift+R | Documents\AtlasRecordings\Sound |
 
-### Capture
-Region or full screen. Optional delay. Copies PNG to the clipboard and saves the file.
-
-### Clip
-Leave it running. Copied text is stored locally. Pin items you need. The hotkey brings the window forward.
-
-### PDF
-Add PDFs or images. Merge, split pages, rotate 90°, images → PDF. Nothing is uploaded.
-
-### Screen Recorder
-Quality, FPS, audio = Microphone / System / Both. Countdown, auto-stop, NVENC when the GPU supports it. Output is MP4.
-
-### Sound Recorder
-Pick the mic, Mono or Stereo, 48 kHz. Live level meter and clip warning. Pause. Output is WAV.
+Keep `ffmpeg.exe` next to `Atlas_Screen_Recorder.exe` (it is already inside the zip).
 
 ## Language
-EN / عربي in the window. The choice is remembered.
 
-## If something fails
-- Setup failed: check the internet and run `Setup.bat` again.
-- No system audio on screen capture: set Audio to **System** or **Both**.
-- Hotkey does nothing: another app owns the shortcut, or start Atlas first.
+EN / عربي in the window. Remembered.
+
+## Mac / Linux
+
+Not in this release. The same Python sources will be packaged later (Mac: avfoundation, Linux: x11grab).

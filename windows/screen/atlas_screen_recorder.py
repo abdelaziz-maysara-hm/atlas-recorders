@@ -78,16 +78,20 @@ T = {
 }
 
 
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def find_ffmpeg():
-    here = Path(__file__).resolve().parent
-    for p in [
-        here / "ffmpeg.exe",
-        here.parent / "ffmpeg" / "bin" / "ffmpeg.exe",
-        here / "ffmpeg" / "bin" / "ffmpeg.exe",
-    ]:
-        if p.exists():
-            return str(p)
-    return shutil.which("ffmpeg")
+    here = app_dir()
+    names = ["ffmpeg.exe", "ffmpeg"]
+    for name in names:
+        for p in [here / name, here / "ffmpeg" / "bin" / name, here.parent / "ffmpeg" / "bin" / name]:
+            if p.exists():
+                return str(p)
+    return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
 
 
 def load_cfg():
