@@ -3,14 +3,14 @@ import customtkinter as ctk
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
-import queue, time, os, sys, threading, json
+import time, os, sys, threading, json
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
 APP = "Atlas Sound Recorder"
 OUT = Path.home() / "AtlasRecordings" / "Sound"
-CFG = Path.home() / "AtlasRecordings" / "atlas_lang.json"
+CFG = Path.home() / "AtlasRecordings" / "atlas_settings.json"
 OUT.mkdir(parents=True, exist_ok=True)
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -32,6 +32,9 @@ T = {
         "saved": "Saved",
         "count": "3-second countdown",
         "top": "Always on top while recording",
+        "auto": "Auto-stop",
+        "off": "Off",
+        "clip": "CLIP",
         "lang": "عربي",
     },
     "ar": {
@@ -50,33 +53,42 @@ T = {
         "saved": "تم الحفظ",
         "count": "عدّ تنازلي 3 ثوانٍ",
         "top": "دائمًا في المقدمة أثناء التسجيل",
+        "auto": "إيقاف تلقائي",
+        "off": "بدون",
+        "clip": "قص",
         "lang": "EN",
     },
 }
 
 
-def load_lang():
+def load_cfg():
     try:
-        return json.loads(CFG.read_text(encoding="utf-8")).get("lang", "en")
+        return json.loads(CFG.read_text(encoding="utf-8"))
     except Exception:
-        return "en"
+        return {}
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.lang = load_lang() if load_lang() in T else "en"
+        self.cfg = load_cfg()
+        self.lang = self.cfg.get("lang", "en")
+        if self.lang not in T:
+            self.lang = "en"
         self.title(APP)
-        self.geometry("640x560")
+        self.geometry("640x620")
         self.recording = False
         self.paused = False
         self.frames = []
         self.stream = None
         self.t0 = 0
         self.elapsed = 0
+        self.peak = 0.0
+        self.clipped = False
+        self.auto_limit = 0
         self.build()
         self.load_devices()
-        self.after(200, self.tick)
+        self.after(80, self.tick)
         threading.Thread(target=self.hotkey_loop, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -85,7 +97,7 @@ class App(ctk.CTk):
 
     def persist(self):
         CFG.parent.mkdir(parents=True, exist_ok=True)
-        CFG.write_text(json.dumps({"lang": self.lang}), encoding="utf-8")
+        CFG.write_text(json.dumps({**self.cfg, "lang": self.lang}), encoding="utf-8")
 
     def toggle_lang(self):
         self.lang = "ar" if self.lang == "en" else "en"
@@ -110,13 +122,21 @@ class App(ctk.CTk):
         self.ch = ctk.CTkOptionMenu(row, values=[self.t("mono"), self.t("stereo")], width=120)
         self.ch.set(self.t("mono"))
         self.ch.pack(side="left", padx=6)
+        self.auto = ctk.CTkOptionMenu(row, values=[self.t("off"), "5", "15", "30", "60"], width=120)
+        self.auto.set(self.t("off"))
+        self.auto.pack(side="left", padx=6)
         self.use_count = ctk.CTkCheckBox(self, text=self.t("count"))
         self.use_count.pack(pady=6)
         self.use_top = ctk.CTkCheckBox(self, text=self.t("top"))
         self.use_top.select()
         self.use_top.pack(pady=4)
+        self.meter = ctk.CTkProgressBar(self, width=420, height=14)
+        self.meter.set(0)
+        self.meter.pack(pady=10)
+        self.clip = ctk.CTkLabel(self, text="", text_color="#ef4444")
+        self.clip.pack()
         self.timer = ctk.CTkLabel(self, text="00:00:00", font=ctk.CTkFont(size=36, weight="bold"))
-        self.timer.pack(pady=16)
+        self.timer.pack(pady=12)
         self.status = ctk.CTkLabel(self, text=self.t("ready"), text_color="gray")
         self.status.pack()
         btns = ctk.CTkFrame(self, fg_color="transparent")
@@ -144,6 +164,10 @@ class App(ctk.CTk):
     def cb(self, indata, frames, t, status):
         if self.recording and not self.paused:
             self.frames.append(indata.copy())
+            peak = float(np.max(np.abs(indata)))
+            self.peak = peak
+            if peak >= 0.99:
+                self.clipped = True
 
     def toggle(self):
         if not self.recording:
@@ -159,7 +183,13 @@ class App(ctk.CTk):
         self.recording = True
         self.paused = False
         self.elapsed = 0
+        self.peak = 0
+        self.clipped = False
         self.t0 = time.time()
+        try:
+            self.auto_limit = 0 if self.auto.get() == self.t("off") else int(self.auto.get()) * 60
+        except Exception:
+            self.auto_limit = 0
         ch = 1 if self.ch.get() == self.t("mono") else 2
         sr = int(self.sr.get())
         dev = None
@@ -203,6 +233,8 @@ class App(ctk.CTk):
             self.stream = None
         self.b_pause.configure(state="disabled", text=self.t("pause"))
         self.b_stop.configure(state="disabled")
+        self.meter.set(0)
+        self.clip.configure(text="")
         if not self.frames:
             self.status.configure(text=self.t("nothing"))
             return
@@ -239,7 +271,11 @@ class App(ctk.CTk):
             self.elapsed = time.time() - self.t0
             s = int(self.elapsed)
             self.timer.configure(text=f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}")
-        self.after(200, self.tick)
+            self.meter.set(min(1.0, self.peak))
+            self.clip.configure(text=self.t("clip") if self.clipped else "")
+            if self.auto_limit and s >= self.auto_limit:
+                self.stop()
+        self.after(80, self.tick)
 
     def on_close(self):
         if self.recording:

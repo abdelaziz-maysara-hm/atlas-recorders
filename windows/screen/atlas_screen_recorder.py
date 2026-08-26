@@ -7,7 +7,7 @@ from tkinter import messagebox
 
 APP = "Atlas Screen Recorder"
 OUT = Path.home() / "AtlasRecordings" / "Screen"
-CFG = Path.home() / "AtlasRecordings" / "atlas_lang.json"
+CFG = Path.home() / "AtlasRecordings" / "atlas_settings.json"
 OUT.mkdir(parents=True, exist_ok=True)
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -25,11 +25,17 @@ T = {
         "sys": "System",
         "both": "Both",
         "none": "No Audio",
+        "area": "Capture area",
+        "full": "Full screen",
+        "mouse": "Show mouse cursor",
+        "hw": "Hardware encoder if available",
+        "auto": "Auto-stop",
+        "off": "Off",
         "ready": "Ready  ·  Ctrl+Shift+R",
         "start": "Start Recording",
         "stop": "Stop",
         "folder": "Open Folder",
-        "hint": "Hotkey Ctrl+Shift+R  ·  System audio uses WASAPI loopback\nCountdown before capture  ·  Always on top while recording",
+        "hint": "Hotkey Ctrl+Shift+R  ·  WASAPI system audio\nNVENC used automatically when the GPU allows it",
         "rec": "Recording  ·  Ctrl+Shift+R to stop",
         "saved": "Saved",
         "stopped": "Stopped  ·  Ctrl+Shift+R",
@@ -50,11 +56,17 @@ T = {
         "sys": "صوت النظام",
         "both": "الاثنين",
         "none": "بدون صوت",
+        "area": "منطقة التصوير",
+        "full": "الشاشة كاملة",
+        "mouse": "إظهار مؤشر الماوس",
+        "hw": "ترميز العتاد إن وُجد",
+        "auto": "إيقاف تلقائي",
+        "off": "بدون",
         "ready": "جاهز  ·  Ctrl+Shift+R",
         "start": "ابدأ التسجيل",
         "stop": "إيقاف",
         "folder": "فتح المجلد",
-        "hint": "اختصار Ctrl+Shift+R  ·  صوت النظام عبر WASAPI\nعدّ تنازلي قبل التصوير  ·  النافذة فوق الكل أثناء التسجيل",
+        "hint": "اختصار Ctrl+Shift+R  ·  صوت النظام عبر WASAPI\nNVENC يُستخدم تلقائيًا لو كرت الشاشة يدعمه",
         "rec": "جاري التسجيل  ·  Ctrl+Shift+R للإيقاف",
         "saved": "تم الحفظ",
         "stopped": "توقف  ·  Ctrl+Shift+R",
@@ -78,24 +90,29 @@ def find_ffmpeg():
     return shutil.which("ffmpeg")
 
 
-def load_lang():
+def load_cfg():
     try:
-        return json.loads(CFG.read_text(encoding="utf-8")).get("lang", "en")
+        return json.loads(CFG.read_text(encoding="utf-8"))
     except Exception:
-        return "en"
+        return {}
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.lang = load_lang() if load_lang() in T else "en"
+        self.cfg = load_cfg()
+        self.lang = self.cfg.get("lang", "en")
+        if self.lang not in T:
+            self.lang = "en"
         self.title(APP)
-        self.geometry("720x680")
+        self.geometry("740x780")
         self.ff = find_ffmpeg()
+        self.nvenc = self.detect_nvenc()
         self.proc = None
         self.recording = False
         self.t0 = None
         self.out = None
+        self.auto_limit = 0
         self.build()
         self.after(250, self.tick)
         threading.Thread(target=self.hotkey_loop, daemon=True).start()
@@ -106,7 +123,16 @@ class App(ctk.CTk):
 
     def persist(self):
         CFG.parent.mkdir(parents=True, exist_ok=True)
-        CFG.write_text(json.dumps({"lang": self.lang}), encoding="utf-8")
+        CFG.write_text(json.dumps({**self.cfg, "lang": self.lang}), encoding="utf-8")
+
+    def detect_nvenc(self):
+        if not self.ff:
+            return False
+        try:
+            out = subprocess.check_output([self.ff, "-hide_banner", "-encoders"], stderr=subprocess.STDOUT, timeout=8)
+            return b"h264_nvenc" in out
+        except Exception:
+            return False
 
     def toggle_lang(self):
         self.lang = "ar" if self.lang == "en" else "en"
@@ -120,12 +146,10 @@ class App(ctk.CTk):
         top.pack(fill="x", padx=24, pady=(16, 0))
         ctk.CTkLabel(top, text=self.t("title"), font=ctk.CTkFont(size=22, weight="bold")).pack(side="left")
         ctk.CTkButton(top, text=self.t("lang"), width=70, command=self.toggle_lang).pack(side="right")
-        ctk.CTkLabel(
-            self,
-            text="FFmpeg: " + (self.ff or "NOT FOUND"),
-            text_color=("#22c55e" if self.ff else "#ef4444"),
-            font=ctk.CTkFont(size=12),
-        ).pack()
+        ff_txt = "FFmpeg: " + (self.ff or "NOT FOUND")
+        if self.nvenc:
+            ff_txt += "  ·  NVENC"
+        ctk.CTkLabel(self, text=ff_txt, text_color=("#22c55e" if self.ff else "#ef4444"), font=ctk.CTkFont(size=12)).pack()
         box = ctk.CTkFrame(self)
         box.pack(fill="x", padx=24, pady=16)
         ctk.CTkLabel(box, text=self.t("quality")).pack(anchor="w", padx=12, pady=(12, 0))
@@ -136,10 +160,25 @@ class App(ctk.CTk):
         self.fps = ctk.CTkOptionMenu(box, values=["24", "30", "60"])
         self.fps.set("30")
         self.fps.pack(fill="x", padx=12, pady=6)
+        ctk.CTkLabel(box, text=self.t("area")).pack(anchor="w", padx=12)
+        self.area = ctk.CTkOptionMenu(box, values=[self.t("full"), "1920x1080", "1280x720", "854x480"])
+        self.area.set(self.t("full"))
+        self.area.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(box, text=self.t("audio")).pack(anchor="w", padx=12)
         self.audio = ctk.CTkOptionMenu(box, values=[self.t("mic"), self.t("sys"), self.t("both"), self.t("none")])
         self.audio.set(self.t("both"))
         self.audio.pack(fill="x", padx=12, pady=6)
+        ctk.CTkLabel(box, text=self.t("auto")).pack(anchor="w", padx=12)
+        self.auto = ctk.CTkOptionMenu(box, values=[self.t("off"), "5", "15", "30", "60"])
+        self.auto.set(self.t("off"))
+        self.auto.pack(fill="x", padx=12, pady=6)
+        self.use_mouse = ctk.CTkCheckBox(box, text=self.t("mouse"))
+        self.use_mouse.select()
+        self.use_mouse.pack(anchor="w", padx=12, pady=4)
+        self.use_hw = ctk.CTkCheckBox(box, text=self.t("hw"))
+        if self.nvenc:
+            self.use_hw.select()
+        self.use_hw.pack(anchor="w", padx=12, pady=4)
         self.use_count = ctk.CTkCheckBox(box, text=self.t("count"))
         self.use_count.select()
         self.use_count.pack(anchor="w", padx=12, pady=4)
@@ -190,15 +229,23 @@ class App(ctk.CTk):
         q = self.quality.get()
         crf = "18" if "18" in q else "23" if "23" in q else "28"
         cmd = [self.ff, "-y"]
+        grab = ["-f", "gdigrab", "-framerate", self.fps.get(), "-draw_mouse", "1" if self.use_mouse.get() else "0"]
+        if self.area.get() != self.t("full") and "x" in self.area.get():
+            grab += ["-video_size", self.area.get(), "-offset_x", "0", "-offset_y", "0"]
+        grab += ["-i", "desktop"]
         if sys.platform == "win32":
-            cmd += ["-f", "gdigrab", "-framerate", self.fps.get(), "-i", "desktop"]
+            cmd += grab
             cmd += self.audio_args()
         else:
             cmd += ["-f", "x11grab", "-framerate", self.fps.get(), "-i", ":0.0"]
-        if self.audio.get() == self.t("none"):
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-an", str(self.out)]
+        if self.use_hw.get() and self.nvenc:
+            vcodec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", crf, "-pix_fmt", "yuv420p"]
         else:
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(self.out)]
+            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+        if self.audio.get() == self.t("none"):
+            cmd += vcodec + ["-an", str(self.out)]
+        else:
+            cmd += vcodec + ["-c:a", "aac", "-b:a", "192k", str(self.out)]
         si = None
         if sys.platform == "win32":
             si = subprocess.STARTUPINFO()
@@ -208,6 +255,10 @@ class App(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
+        try:
+            self.auto_limit = 0 if self.auto.get() == self.t("off") else int(self.auto.get()) * 60
+        except Exception:
+            self.auto_limit = 0
         self.recording = True
         self.t0 = time.time()
         self.b_rec.configure(state="disabled")
@@ -271,6 +322,8 @@ class App(ctk.CTk):
         if self.recording and self.t0:
             s = int(time.time() - self.t0)
             self.timer.configure(text=f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}")
+            if self.auto_limit and s >= self.auto_limit:
+                self.stop()
         self.after(250, self.tick)
 
     def on_close(self):
