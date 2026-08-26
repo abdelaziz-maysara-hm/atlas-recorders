@@ -1,2 +1,0 @@
-If Stop is off-screen: press Ctrl+Shift+R, or Esc, or Alt+F4.
-Task Manager: end Atlas_Screen_Recorder.exe and ffmpeg.exe.
