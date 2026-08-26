@@ -22,6 +22,10 @@ If SmartScreen says **Windows protected your PC**: **More info** → **Run anywa
 
 Keep `ffmpeg.exe` next to `Atlas_Screen_Recorder.exe` (it is already inside the zip).
 
+Default save folder: `%USERPROFILE%\AtlasRecordings\Screen` (not Documents). Change it with **Change folder**. After Stop, Explorer can open on the file.
+
+Record: full screen, drag a region, or pick a window. A browser tab is not its own window — record the browser window.
+
 ## Language
 
 EN / عربي in the window. Remembered.

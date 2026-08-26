@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import customtkinter as ctk
-import subprocess, shutil, time, os, sys, threading, json
+import subprocess, shutil, time, os, sys, threading, json, ctypes
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, filedialog, Toplevel, Canvas
 
 APP = "Atlas Screen Recorder"
-OUT = Path.home() / "AtlasRecordings" / "Screen"
+DEFAULT_OUT = Path.home() / "AtlasRecordings" / "Screen"
 CFG = Path.home() / "AtlasRecordings" / "atlas_settings.json"
-OUT.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUT.mkdir(parents=True, exist_ok=True)
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
@@ -25,8 +26,15 @@ T = {
         "sys": "System",
         "both": "Both",
         "none": "No Audio",
-        "area": "Capture area",
+        "area": "What to record",
         "full": "Full screen",
+        "region": "Select region…",
+        "window": "A window",
+        "pickwin": "Window",
+        "refresh": "Refresh windows",
+        "nowin": "(no windows)",
+        "savein": "Save folder",
+        "change": "Change folder",
         "mouse": "Show mouse cursor",
         "hw": "Hardware encoder if available",
         "auto": "Auto-stop",
@@ -35,13 +43,16 @@ T = {
         "start": "Start Recording",
         "stop": "Stop",
         "folder": "Open Folder",
-        "hint": "Hotkey Ctrl+Shift+R  ·  WASAPI system audio\nNVENC used automatically when the GPU allows it",
+        "hint": "After Stop, Explorer opens on the file.\nRegion = drag a rectangle. Window = pick from the list.",
         "rec": "Recording  ·  Ctrl+Shift+R to stop",
         "saved": "Saved",
-        "stopped": "Stopped  ·  Ctrl+Shift+R",
+        "stopped": "Stopped  ·  file was not written",
         "count": "3-second countdown",
         "top": "Always on top while recording",
         "missing": "ffmpeg.exe missing next to the app.",
+        "needregion": "Drag a rectangle on the screen to record.",
+        "needwin": "Pick a window from the list.",
+        "openq": "Open the folder now?",
         "lang": "عربي",
     },
     "ar": {
@@ -56,8 +67,15 @@ T = {
         "sys": "صوت النظام",
         "both": "الاثنين",
         "none": "بدون صوت",
-        "area": "منطقة التصوير",
+        "area": "ماذا تسجّل",
         "full": "الشاشة كاملة",
+        "region": "اختيار منطقة…",
+        "window": "نافذة",
+        "pickwin": "النافذة",
+        "refresh": "تحديث النوافذ",
+        "nowin": "(لا توجد نوافذ)",
+        "savein": "مجلد الحفظ",
+        "change": "تغيير المجلد",
         "mouse": "إظهار مؤشر الماوس",
         "hw": "ترميز العتاد إن وُجد",
         "auto": "إيقاف تلقائي",
@@ -66,13 +84,16 @@ T = {
         "start": "ابدأ التسجيل",
         "stop": "إيقاف",
         "folder": "فتح المجلد",
-        "hint": "اختصار Ctrl+Shift+R  ·  صوت النظام عبر WASAPI\nNVENC يُستخدم تلقائيًا لو كرت الشاشة يدعمه",
+        "hint": "بعد الإيقاف يفتح المجلد على الملف.\nالمنطقة = اسحب مستطيل. النافذة = اختَر من القائمة.",
         "rec": "جاري التسجيل  ·  Ctrl+Shift+R للإيقاف",
         "saved": "تم الحفظ",
-        "stopped": "توقف  ·  Ctrl+Shift+R",
+        "stopped": "توقف  ·  الملف ما اتكتبش",
         "count": "عدّ تنازلي 3 ثوانٍ",
         "top": "دائمًا في المقدمة أثناء التسجيل",
         "missing": "ffmpeg.exe غير موجود بجانب البرنامج.",
+        "needregion": "اسحب مستطيل على الشاشة للتسجيل.",
+        "needwin": "اختَر نافذة من القائمة.",
+        "openq": "فتح المجلد الآن؟",
         "lang": "EN",
     },
 }
@@ -101,6 +122,78 @@ def load_cfg():
         return {}
 
 
+def list_windows():
+    if sys.platform != "win32":
+        return []
+    user32 = ctypes.windll.user32
+    result = []
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length < 1:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value.strip()
+        if not title or title == APP:
+            return True
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        if rect.right - rect.left < 40 or rect.bottom - rect.top < 40:
+            return True
+        result.append((int(hwnd), title))
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(cb), 0)
+    return result[:40]
+
+
+def pick_region(parent):
+    picked = {"box": None}
+    overlay = Toplevel(parent)
+    overlay.attributes("-fullscreen", True)
+    overlay.attributes("-topmost", True)
+    overlay.attributes("-alpha", 0.3)
+    overlay.configure(bg="black", cursor="crosshair")
+    canvas = Canvas(overlay, bg="black", highlightthickness=0, cursor="crosshair")
+    canvas.pack(fill="both", expand=True)
+    start = {"x": 0, "y": 0, "id": None}
+
+    def down(e):
+        start["x"], start["y"] = e.x, e.y
+        if start["id"]:
+            canvas.delete(start["id"])
+        start["id"] = canvas.create_rectangle(e.x, e.y, e.x, e.y, outline="#22c55e", width=3)
+
+    def move(e):
+        if start["id"]:
+            canvas.coords(start["id"], start["x"], start["y"], e.x, e.y)
+
+    def up(e):
+        x1, y1 = overlay.winfo_rootx() + min(start["x"], e.x), overlay.winfo_rooty() + min(start["y"], e.y)
+        w, h = abs(e.x - start["x"]), abs(e.y - start["y"])
+        w -= w % 2
+        h -= h % 2
+        if w >= 16 and h >= 16:
+            picked["box"] = (x1, y1, w, h)
+        overlay.destroy()
+
+    def cancel(_e=None):
+        overlay.destroy()
+
+    canvas.bind("<ButtonPress-1>", down)
+    canvas.bind("<B1-Motion>", move)
+    canvas.bind("<ButtonRelease-1>", up)
+    overlay.bind("<Escape>", cancel)
+    overlay.focus_force()
+    overlay.grab_set()
+    parent.wait_window(overlay)
+    return picked["box"]
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -108,8 +201,11 @@ class App(ctk.CTk):
         self.lang = self.cfg.get("lang", "en")
         if self.lang not in T:
             self.lang = "en"
+        saved = self.cfg.get("out_dir")
+        self.out_dir = Path(saved) if saved else DEFAULT_OUT
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.title(APP)
-        self.geometry("740x780")
+        self.geometry("760x900")
         self.ff = find_ffmpeg()
         self.nvenc = self.detect_nvenc()
         self.proc = None
@@ -117,6 +213,8 @@ class App(ctk.CTk):
         self.t0 = None
         self.out = None
         self.auto_limit = 0
+        self.region = None
+        self.windows = []
         self.build()
         self.after(250, self.tick)
         threading.Thread(target=self.hotkey_loop, daemon=True).start()
@@ -127,7 +225,10 @@ class App(ctk.CTk):
 
     def persist(self):
         CFG.parent.mkdir(parents=True, exist_ok=True)
-        CFG.write_text(json.dumps({**self.cfg, "lang": self.lang}), encoding="utf-8")
+        CFG.write_text(
+            json.dumps({**self.cfg, "lang": self.lang, "out_dir": str(self.out_dir)}),
+            encoding="utf-8",
+        )
 
     def detect_nvenc(self):
         if not self.ff:
@@ -154,9 +255,28 @@ class App(ctk.CTk):
         if self.nvenc:
             ff_txt += "  ·  NVENC"
         ctk.CTkLabel(self, text=ff_txt, text_color=("#22c55e" if self.ff else "#ef4444"), font=ctk.CTkFont(size=12)).pack()
+
         box = ctk.CTkFrame(self)
-        box.pack(fill="x", padx=24, pady=16)
-        ctk.CTkLabel(box, text=self.t("quality")).pack(anchor="w", padx=12, pady=(12, 0))
+        box.pack(fill="x", padx=24, pady=12)
+
+        ctk.CTkLabel(box, text=self.t("savein")).pack(anchor="w", padx=12, pady=(12, 0))
+        save_row = ctk.CTkFrame(box, fg_color="transparent")
+        save_row.pack(fill="x", padx=12, pady=6)
+        self.path_lbl = ctk.CTkLabel(save_row, text=str(self.out_dir), text_color="gray", wraplength=480, justify="left")
+        self.path_lbl.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(save_row, text=self.t("change"), width=120, command=self.change_dir).pack(side="right", padx=4)
+
+        ctk.CTkLabel(box, text=self.t("area")).pack(anchor="w", padx=12, pady=(8, 0))
+        self.area = ctk.CTkOptionMenu(box, values=[self.t("full"), self.t("region"), self.t("window")], command=self.on_area)
+        self.area.set(self.t("full"))
+        self.area.pack(fill="x", padx=12, pady=6)
+
+        self.win_row = ctk.CTkFrame(box, fg_color="transparent")
+        self.win_menu = ctk.CTkOptionMenu(self.win_row, values=[self.t("nowin")])
+        self.win_menu.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(self.win_row, text=self.t("refresh"), width=140, command=self.refresh_windows).pack(side="right", padx=6)
+
+        ctk.CTkLabel(box, text=self.t("quality")).pack(anchor="w", padx=12)
         self.quality = ctk.CTkOptionMenu(box, values=[self.t("high"), self.t("bal"), self.t("small")])
         self.quality.set(self.t("high"))
         self.quality.pack(fill="x", padx=12, pady=6)
@@ -164,10 +284,6 @@ class App(ctk.CTk):
         self.fps = ctk.CTkOptionMenu(box, values=["24", "30", "60"])
         self.fps.set("30")
         self.fps.pack(fill="x", padx=12, pady=6)
-        ctk.CTkLabel(box, text=self.t("area")).pack(anchor="w", padx=12)
-        self.area = ctk.CTkOptionMenu(box, values=[self.t("full"), "1920x1080", "1280x720", "854x480"])
-        self.area.set(self.t("full"))
-        self.area.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(box, text=self.t("audio")).pack(anchor="w", padx=12)
         self.audio = ctk.CTkOptionMenu(box, values=[self.t("mic"), self.t("sys"), self.t("both"), self.t("none")])
         self.audio.set(self.t("both"))
@@ -189,6 +305,7 @@ class App(ctk.CTk):
         self.use_top = ctk.CTkCheckBox(box, text=self.t("top"))
         self.use_top.select()
         self.use_top.pack(anchor="w", padx=12, pady=(4, 14))
+
         self.timer = ctk.CTkLabel(self, text="00:00:00", font=ctk.CTkFont(size=40, weight="bold"))
         self.timer.pack(pady=8)
         self.status = ctk.CTkLabel(self, text=self.t("ready"), text_color="gray")
@@ -199,8 +316,45 @@ class App(ctk.CTk):
         self.b_rec.pack(side="left", padx=6)
         self.b_stop = ctk.CTkButton(btns, text=self.t("stop"), width=120, height=48, state="disabled", command=self.stop)
         self.b_stop.pack(side="left", padx=6)
-        ctk.CTkButton(btns, text=self.t("folder"), width=120, height=48, fg_color="#1e293b", command=self.open_dir).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text=self.t("folder"), width=140, height=48, fg_color="#1e293b", command=self.open_dir).pack(side="left", padx=6)
         ctk.CTkLabel(self, text=self.t("hint"), text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=8)
+        self.refresh_windows()
+
+    def on_area(self, value):
+        if value == self.t("window"):
+            self.win_row.pack(fill="x", padx=12, pady=4)
+            self.refresh_windows()
+        else:
+            self.win_row.pack_forget()
+        if value == self.t("region"):
+            self.after(120, self.choose_region)
+
+    def choose_region(self):
+        self.withdraw()
+        self.update()
+        time.sleep(0.15)
+        box = pick_region(self)
+        self.deiconify()
+        if box:
+            self.region = box
+            self.status.configure(text=f"{box[2]}×{box[3]} @ {box[0]},{box[1]}", text_color="#22c55e")
+        else:
+            self.area.set(self.t("full"))
+            self.status.configure(text=self.t("needregion"), text_color="#facc15")
+
+    def refresh_windows(self):
+        self.windows = list_windows()
+        labels = [f"{title[:48]}" for _hwnd, title in self.windows] or [self.t("nowin")]
+        self.win_menu.configure(values=labels)
+        self.win_menu.set(labels[0])
+
+    def change_dir(self):
+        chosen = filedialog.askdirectory(initialdir=str(self.out_dir))
+        if chosen:
+            self.out_dir = Path(chosen)
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            self.path_lbl.configure(text=str(self.out_dir))
+            self.persist()
 
     def audio_args(self):
         mode = self.audio.get()
@@ -217,26 +371,52 @@ class App(ctk.CTk):
             "-filter_complex", "amix=inputs=2:duration=longest",
         ]
 
+    def grab_args(self):
+        mouse = "1" if self.use_mouse.get() else "0"
+        fps = self.fps.get()
+        grab = ["-f", "gdigrab", "-framerate", fps, "-draw_mouse", mouse]
+        mode = self.area.get()
+        if mode == self.t("region"):
+            if not self.region:
+                return None
+            x, y, w, h = self.region
+            grab += ["-offset_x", str(x), "-offset_y", str(y), "-video_size", f"{w}x{h}", "-i", "desktop"]
+            return grab
+        if mode == self.t("window"):
+            label = self.win_menu.get()
+            hwnd = None
+            for handle, title in self.windows:
+                if title[:48] == label:
+                    hwnd = handle
+                    break
+            if hwnd is None:
+                return None
+            grab += ["-i", f"hwnd={hwnd}"]
+            return grab
+        grab += ["-i", "desktop"]
+        return grab
+
     def start(self):
         if not self.ff:
             messagebox.showerror("FFmpeg", self.t("missing"))
             return
         if self.recording:
             return
+        grab = self.grab_args()
+        if grab is None:
+            messagebox.showinfo(APP, self.t("needregion") if self.area.get() == self.t("region") else self.t("needwin"))
+            return
         if self.use_count.get():
             for n in (3, 2, 1):
                 self.status.configure(text=str(n), text_color="#facc15")
                 self.update()
                 time.sleep(0.7)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.out = OUT / f"Atlas_Screen_{ts}.mp4"
+        self.out = self.out_dir / f"Atlas_Screen_{ts}.mp4"
         q = self.quality.get()
         crf = "18" if "18" in q else "23" if "23" in q else "28"
         cmd = [self.ff, "-y"]
-        grab = ["-f", "gdigrab", "-framerate", self.fps.get(), "-draw_mouse", "1" if self.use_mouse.get() else "0"]
-        if self.area.get() != self.t("full") and "x" in self.area.get():
-            grab += ["-video_size", self.area.get(), "-offset_x", "0", "-offset_y", "0"]
-        grab += ["-i", "desktop"]
         if sys.platform == "win32":
             cmd += grab
             cmd += self.audio_args()
@@ -286,12 +466,20 @@ class App(ctk.CTk):
             self.proc = None
         self.b_rec.configure(state="normal")
         self.b_stop.configure(state="disabled")
-        if self.out and self.out.exists():
-            mb = self.out.stat().st_size / 1024 / 1024
-            self.status.configure(text=f"{self.t('saved')} {self.out.name} ({mb:.1f} MB)", text_color="#22c55e")
-        else:
-            self.status.configure(text=self.t("stopped"))
         self.timer.configure(text="00:00:00")
+        if self.out and self.out.exists() and self.out.stat().st_size > 0:
+            mb = self.out.stat().st_size / 1024 / 1024
+            self.status.configure(text=f"{self.t('saved')}\n{self.out}", text_color="#22c55e")
+            if messagebox.askyesno(APP, f"{self.t('saved')}\n{self.out}\n({mb:.1f} MB)\n\n{self.t('openq')}"):
+                self.reveal()
+        else:
+            self.status.configure(text=self.t("stopped"), text_color="#ef4444")
+
+    def reveal(self):
+        if sys.platform == "win32" and self.out and self.out.exists():
+            subprocess.run(["explorer", "/select,", str(self.out)])
+        else:
+            self.open_dir()
 
     def toggle_hotkey(self):
         if self.recording:
@@ -303,11 +491,10 @@ class App(ctk.CTk):
         if sys.platform != "win32":
             return
         try:
-            import ctypes
-            from ctypes import wintypes
             user32 = ctypes.windll.user32
             if not user32.RegisterHotKey(None, 1, 0x0002 | 0x0004, 0x52):
                 return
+            from ctypes import wintypes
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 if msg.message == 0x0312:
@@ -316,11 +503,11 @@ class App(ctk.CTk):
             return
 
     def open_dir(self):
-        OUT.mkdir(parents=True, exist_ok=True)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
-            os.startfile(OUT)
+            os.startfile(self.out_dir)
         else:
-            subprocess.run(["xdg-open", str(OUT)])
+            subprocess.run(["xdg-open", str(self.out_dir)])
 
     def tick(self):
         if self.recording and self.t0:
