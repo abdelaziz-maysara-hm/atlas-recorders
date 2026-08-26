@@ -53,6 +53,7 @@ T = {
         "needregion": "Drag a rectangle on the screen to record.",
         "needwin": "Pick a window from the list.",
         "openq": "Open the folder now?",
+        "esc": "Stop: Ctrl+Shift+R  or  Esc",
         "lang": "عربي",
     },
     "ar": {
@@ -94,6 +95,7 @@ T = {
         "needregion": "اسحب مستطيل على الشاشة للتسجيل.",
         "needwin": "اختَر نافذة من القائمة.",
         "openq": "فتح المجلد الآن؟",
+        "esc": "إيقاف: Ctrl+Shift+R  أو  Esc",
         "lang": "EN",
     },
 }
@@ -205,7 +207,11 @@ class App(ctk.CTk):
         self.out_dir = Path(saved) if saved else DEFAULT_OUT
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.title(APP)
-        self.geometry("760x900")
+        sw = max(self.winfo_screenwidth(), 800)
+        sh = max(self.winfo_screenheight(), 600)
+        self.geometry(f"{min(720, sw - 48)}x{min(560, sh - 80)}")
+        self.minsize(480, 340)
+        self.maxsize(sw, sh)
         self.ff = find_ffmpeg()
         self.nvenc = self.detect_nvenc()
         self.proc = None
@@ -215,7 +221,9 @@ class App(ctk.CTk):
         self.auto_limit = 0
         self.region = None
         self.windows = []
+        self._prev_geo = None
         self.build()
+        self.bind("<Escape>", lambda _e: self.stop() if self.recording else None)
         self.after(250, self.tick)
         threading.Thread(target=self.hotkey_loop, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -247,22 +255,38 @@ class App(ctk.CTk):
         self.build()
 
     def build(self):
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=24, pady=(16, 0))
-        ctk.CTkLabel(top, text=self.t("title"), font=ctk.CTkFont(size=22, weight="bold")).pack(side="left")
-        ctk.CTkButton(top, text=self.t("lang"), width=70, command=self.toggle_lang).pack(side="right")
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(12, 0))
+        ctk.CTkLabel(header, text=self.t("title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
+        ctk.CTkButton(header, text=self.t("lang"), width=70, command=self.toggle_lang).pack(side="right")
         ff_txt = "FFmpeg: " + (self.ff or "NOT FOUND")
         if self.nvenc:
             ff_txt += "  ·  NVENC"
         ctk.CTkLabel(self, text=ff_txt, text_color=("#22c55e" if self.ff else "#ef4444"), font=ctk.CTkFont(size=12)).pack()
 
-        box = ctk.CTkFrame(self)
-        box.pack(fill="x", padx=24, pady=12)
+        foot = ctk.CTkFrame(self)
+        foot.pack(side="bottom", fill="x", padx=16, pady=12)
+        self.timer = ctk.CTkLabel(foot, text="00:00:00", font=ctk.CTkFont(size=28, weight="bold"))
+        self.timer.pack(pady=(8, 0))
+        self.status = ctk.CTkLabel(foot, text=self.t("ready"), text_color="gray")
+        self.status.pack()
+        btns = ctk.CTkFrame(foot, fg_color="transparent")
+        btns.pack(pady=8)
+        self.b_rec = ctk.CTkButton(btns, text=self.t("start"), fg_color="#dc2626", width=150, height=44, command=self.start)
+        self.b_rec.pack(side="left", padx=6)
+        self.b_stop = ctk.CTkButton(btns, text=self.t("stop"), width=110, height=44, state="disabled", command=self.stop)
+        self.b_stop.pack(side="left", padx=6)
+        ctk.CTkButton(btns, text=self.t("folder"), width=120, height=44, fg_color="#1e293b", command=self.open_dir).pack(side="left", padx=6)
+        ctk.CTkLabel(foot, text=self.t("esc"), text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=(0, 8))
 
-        ctk.CTkLabel(box, text=self.t("savein")).pack(anchor="w", padx=12, pady=(12, 0))
+        self.settings = ctk.CTkScrollableFrame(self)
+        self.settings.pack(fill="both", expand=True, padx=16, pady=8)
+        box = self.settings
+
+        ctk.CTkLabel(box, text=self.t("savein")).pack(anchor="w", padx=12, pady=(8, 0))
         save_row = ctk.CTkFrame(box, fg_color="transparent")
         save_row.pack(fill="x", padx=12, pady=6)
-        self.path_lbl = ctk.CTkLabel(save_row, text=str(self.out_dir), text_color="gray", wraplength=480, justify="left")
+        self.path_lbl = ctk.CTkLabel(save_row, text=str(self.out_dir), text_color="gray", wraplength=440, justify="left")
         self.path_lbl.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(save_row, text=self.t("change"), width=120, command=self.change_dir).pack(side="right", padx=4)
 
@@ -305,19 +329,7 @@ class App(ctk.CTk):
         self.use_top = ctk.CTkCheckBox(box, text=self.t("top"))
         self.use_top.select()
         self.use_top.pack(anchor="w", padx=12, pady=(4, 14))
-
-        self.timer = ctk.CTkLabel(self, text="00:00:00", font=ctk.CTkFont(size=40, weight="bold"))
-        self.timer.pack(pady=8)
-        self.status = ctk.CTkLabel(self, text=self.t("ready"), text_color="gray")
-        self.status.pack()
-        btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.pack(pady=16)
-        self.b_rec = ctk.CTkButton(btns, text=self.t("start"), fg_color="#dc2626", width=180, height=48, command=self.start)
-        self.b_rec.pack(side="left", padx=6)
-        self.b_stop = ctk.CTkButton(btns, text=self.t("stop"), width=120, height=48, state="disabled", command=self.stop)
-        self.b_stop.pack(side="left", padx=6)
-        ctk.CTkButton(btns, text=self.t("folder"), width=140, height=48, fg_color="#1e293b", command=self.open_dir).pack(side="left", padx=6)
-        ctk.CTkLabel(self, text=self.t("hint"), text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=8)
+        ctk.CTkLabel(box, text=self.t("hint"), text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=8)
         self.refresh_windows()
 
     def on_area(self, value):
@@ -448,14 +460,13 @@ class App(ctk.CTk):
         self.b_rec.configure(state="disabled")
         self.b_stop.configure(state="normal")
         self.status.configure(text=self.t("rec"), text_color="#ef4444")
-        if self.use_top.get():
-            self.attributes("-topmost", True)
+        self.compact_rec()
 
     def stop(self):
         if not self.recording:
             return
         self.recording = False
-        self.attributes("-topmost", False)
+        self.expand_rec()
         if self.proc:
             try:
                 self.proc.stdin.write(b"q")
@@ -480,6 +491,31 @@ class App(ctk.CTk):
             subprocess.run(["explorer", "/select,", str(self.out)])
         else:
             self.open_dir()
+
+
+    def compact_rec(self):
+        self._prev_geo = self.geometry()
+        try:
+            self.settings.pack_forget()
+        except Exception:
+            pass
+        sw = self.winfo_screenwidth()
+        self.geometry(f"420x170+{max(16, sw - 440)}+16")
+        self.minsize(360, 150)
+        self.attributes("-topmost", True)
+        self.deiconify()
+        self.lift()
+
+    def expand_rec(self):
+        self.attributes("-topmost", False)
+        try:
+            self.settings.pack(fill="both", expand=True, padx=16, pady=8)
+        except Exception:
+            pass
+        sw = max(self.winfo_screenwidth(), 800)
+        sh = max(self.winfo_screenheight(), 600)
+        self.minsize(480, 340)
+        self.geometry(self._prev_geo or f"{min(720, sw - 48)}x{min(560, sh - 80)}")
 
     def toggle_hotkey(self):
         if self.recording:
