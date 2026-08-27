@@ -54,6 +54,8 @@ T = {
         "needwin": "Pick a window from the list.",
         "openq": "Open the folder now?",
         "esc": "Stop: Ctrl+Shift+R  or  Esc",
+        "novid": "No video file was written.",
+        "fffail": "FFmpeg exited before recording. Check audio (try System or No Audio). Log:",
         "lang": "عربي",
     },
     "ar": {
@@ -96,6 +98,8 @@ T = {
         "needwin": "اختَر نافذة من القائمة.",
         "openq": "فتح المجلد الآن؟",
         "esc": "إيقاف: Ctrl+Shift+R  أو  Esc",
+        "novid": "مفيش ملف فيديو اتكتب.",
+        "fffail": "FFmpeg وقف قبل التسجيل. جرّب صوت النظام أو بدون صوت. اللوج:",
         "lang": "EN",
     },
 }
@@ -222,6 +226,8 @@ class App(ctk.CTk):
         self.region = None
         self.windows = []
         self._prev_geo = None
+        self.log_path = DEFAULT_OUT / "ffmpeg_last.log"
+        self.dshow_mic = None
         self.build()
         self.bind("<Escape>", lambda _e: self.stop() if self.recording else None)
         self.after(250, self.tick)
@@ -310,7 +316,7 @@ class App(ctk.CTk):
         self.fps.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(box, text=self.t("audio")).pack(anchor="w", padx=12)
         self.audio = ctk.CTkOptionMenu(box, values=[self.t("mic"), self.t("sys"), self.t("both"), self.t("none")])
-        self.audio.set(self.t("both"))
+        self.audio.set(self.t("sys"))
         self.audio.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(box, text=self.t("auto")).pack(anchor="w", padx=12)
         self.auto = ctk.CTkOptionMenu(box, values=[self.t("off"), "5", "15", "30", "60"])
@@ -368,25 +374,10 @@ class App(ctk.CTk):
             self.path_lbl.configure(text=str(self.out_dir))
             self.persist()
 
-    def audio_args(self):
-        mode = self.audio.get()
-        none, mic, sys_, both = self.t("none"), self.t("mic"), self.t("sys"), self.t("both")
-        if mode == none:
-            return []
-        if mode == mic:
-            return ["-f", "dshow", "-i", "audio=default"]
-        if mode == sys_:
-            return ["-f", "wasapi", "-loopback", "1", "-i", "default"]
-        return [
-            "-f", "wasapi", "-loopback", "1", "-i", "default",
-            "-f", "dshow", "-i", "audio=default",
-            "-filter_complex", "amix=inputs=2:duration=longest",
-        ]
-
     def grab_args(self):
         mouse = "1" if self.use_mouse.get() else "0"
         fps = self.fps.get()
-        grab = ["-f", "gdigrab", "-framerate", fps, "-draw_mouse", mouse]
+        grab = ["-f", "gdigrab", "-framerate", fps, "-draw_mouse", mouse, "-rtbufsize", "256M", "-thread_queue_size", "512"]
         mode = self.area.get()
         if mode == self.t("region"):
             if not self.region:
@@ -408,6 +399,99 @@ class App(ctk.CTk):
         grab += ["-i", "desktop"]
         return grab
 
+    def ffmpeg_si(self):
+        si, flags = None, 0
+        if sys.platform == "win32":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return si, flags
+
+    def read_log(self):
+        try:
+            txt = Path(self.log_path).read_text(encoding="utf-8", errors="ignore")
+            lines = [ln for ln in txt.splitlines() if ln.strip()]
+            return "\n".join(lines[-18:]) or txt[-1500:]
+        except Exception:
+            return ""
+
+    def find_dshow_mic(self):
+        if self.dshow_mic:
+            return self.dshow_mic
+        if not self.ff or sys.platform != "win32":
+            return None
+        si, flags = self.ffmpeg_si()
+        try:
+            p = subprocess.run(
+                [self.ff, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                capture_output=True, timeout=8, startupinfo=si, creationflags=flags,
+            )
+            text = (p.stderr or b"").decode("utf-8", "ignore") + (p.stdout or b"").decode("utf-8", "ignore")
+        except Exception:
+            return None
+        in_audio = False
+        for line in text.splitlines():
+            low = line.lower()
+            if "directshow audio" in low:
+                in_audio = True
+                continue
+            if "directshow video" in low:
+                in_audio = False
+                continue
+            if in_audio and '"' in line:
+                name = line.split('"', 2)[1].strip()
+                if name:
+                    self.dshow_mic = name
+                    return name
+        return None
+
+    def audio_args(self, mode):
+        none, mic, sys_, both = self.t("none"), self.t("mic"), self.t("sys"), self.t("both")
+        if mode == none:
+            return []
+        if mode == mic:
+            name = self.find_dshow_mic() or "default"
+            return ["-f", "dshow", "-thread_queue_size", "512", "-i", f"audio={name}"]
+        if mode == sys_:
+            return ["-f", "wasapi", "-thread_queue_size", "512", "-loopback", "1", "-i", "default"]
+        mic_name = self.find_dshow_mic() or "default"
+        return [
+            "-f", "wasapi", "-thread_queue_size", "512", "-loopback", "1", "-i", "default",
+            "-f", "dshow", "-thread_queue_size", "512", "-i", f"audio={mic_name}",
+            "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=2",
+        ]
+
+    def vcodec_args(self, use_hw, crf):
+        if use_hw and self.nvenc:
+            return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", crf, "-pix_fmt", "yuv420p"]
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+
+    def build_cmd(self, grab, mode, use_hw, crf):
+        none = self.t("none")
+        cmd = [self.ff, "-y", "-loglevel", "info"]
+        cmd += grab
+        cmd += self.audio_args(mode)
+        cmd += self.vcodec_args(use_hw, crf)
+        if mode == none:
+            cmd += ["-an"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+        cmd += ["-movflags", "+faststart", str(self.out)]
+        return cmd
+
+    def spawn(self, cmd):
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = self.out_dir / "ffmpeg_last.log"
+        si, flags = self.ffmpeg_si()
+        logf = open(self.log_path, "w", encoding="utf-8", errors="replace")
+        logf.write("CMD: " + " ".join(cmd) + "\n\n")
+        logf.flush()
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=logf, stderr=logf,
+            startupinfo=si, creationflags=flags,
+        )
+        return proc, logf
+
     def start(self):
         if not self.ff:
             messagebox.showerror("FFmpeg", self.t("missing"))
@@ -428,28 +512,43 @@ class App(ctk.CTk):
         self.out = self.out_dir / f"Atlas_Screen_{ts}.mp4"
         q = self.quality.get()
         crf = "18" if "18" in q else "23" if "23" in q else "28"
-        cmd = [self.ff, "-y"]
-        if sys.platform == "win32":
-            cmd += grab
-            cmd += self.audio_args()
+        want = self.audio.get()
+        none, mic, sys_, both = self.t("none"), self.t("mic"), self.t("sys"), self.t("both")
+        if want == both:
+            modes = [both, sys_, none]
+        elif want == mic:
+            modes = [mic, none]
+        elif want == sys_:
+            modes = [sys_, none]
         else:
-            cmd += ["-f", "x11grab", "-framerate", self.fps.get(), "-i", ":0.0"]
-        if self.use_hw.get() and self.nvenc:
-            vcodec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", crf, "-pix_fmt", "yuv420p"]
-        else:
-            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-        if self.audio.get() == self.t("none"):
-            cmd += vcodec + ["-an", str(self.out)]
-        else:
-            cmd += vcodec + ["-c:a", "aac", "-b:a", "192k", str(self.out)]
-        si = None
-        if sys.platform == "win32":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        try:
-            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+            modes = [none]
+        hw_tries = [True, False] if (self.use_hw.get() and self.nvenc) else [False]
+        last_log = ""
+        started = False
+        for mode in modes:
+            for hw in hw_tries:
+                cmd = self.build_cmd(grab, mode, hw, crf)
+                try:
+                    proc, logf = self.spawn(cmd)
+                except Exception as e:
+                    messagebox.showerror("Error", str(e))
+                    return
+                time.sleep(1.1)
+                if proc.poll() is None:
+                    self.proc = proc
+                    self._logf = logf
+                    started = True
+                    break
+                last_log = self.read_log()
+                try:
+                    logf.close()
+                except Exception:
+                    pass
+            if started:
+                break
+        if not started:
+            self.status.configure(text=self.t("novid"), text_color="#ef4444")
+            messagebox.showerror(APP, self.t("fffail") + "\n\n" + (last_log or "(empty log)"))
             return
         try:
             self.auto_limit = 0 if self.auto.get() == self.t("off") else int(self.auto.get()) * 60
@@ -469,22 +568,37 @@ class App(ctk.CTk):
         self.expand_rec()
         if self.proc:
             try:
-                self.proc.stdin.write(b"q")
-                self.proc.stdin.flush()
-                self.proc.wait(timeout=8)
+                if self.proc.poll() is None:
+                    self.proc.stdin.write(b"q\n")
+                    self.proc.stdin.flush()
+                    self.proc.wait(timeout=12)
             except Exception:
-                self.proc.terminate()
+                try:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=4)
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
             self.proc = None
+        try:
+            getattr(self, "_logf", None) and self._logf.close()
+        except Exception:
+            pass
         self.b_rec.configure(state="normal")
         self.b_stop.configure(state="disabled")
         self.timer.configure(text="00:00:00")
-        if self.out and self.out.exists() and self.out.stat().st_size > 0:
+        if self.out and self.out.exists() and self.out.stat().st_size > 1024:
             mb = self.out.stat().st_size / 1024 / 1024
             self.status.configure(text=f"{self.t('saved')}\n{self.out}", text_color="#22c55e")
             if messagebox.askyesno(APP, f"{self.t('saved')}\n{self.out}\n({mb:.1f} MB)\n\n{self.t('openq')}"):
                 self.reveal()
         else:
-            self.status.configure(text=self.t("stopped"), text_color="#ef4444")
+            self.status.configure(text=self.t("novid"), text_color="#ef4444")
+            log = self.read_log()
+            if log:
+                messagebox.showerror(APP, self.t("novid") + "\n\n" + log)
 
     def reveal(self):
         if sys.platform == "win32" and self.out and self.out.exists():
@@ -546,6 +660,9 @@ class App(ctk.CTk):
             subprocess.run(["xdg-open", str(self.out_dir)])
 
     def tick(self):
+        if self.recording and self.proc and self.proc.poll() is not None:
+            self.stop()
+            return
         if self.recording and self.t0:
             s = int(time.time() - self.t0)
             self.timer.configure(text=f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}")
